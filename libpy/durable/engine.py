@@ -17,6 +17,40 @@ def _unix_now():
     return delta.total_seconds()
 
 
+class Closure_Queue(object):
+
+    def __init__(self):
+        self._queued_posts = []
+        self._queued_asserts = []
+        self._queued_retracts = []
+
+    def get_queued_posts(self):
+        return self._queued_posts
+
+    def get_queued_asserts(self):
+        return self._queued_posts
+
+    def get_queued_retracts(self):
+        return self._queued_posts      
+
+    def post(self, message):
+        if isinstance(message, Content):
+            message = message._d
+
+        self._queued_posts.append(message)
+
+    def assert_fact(self, message):
+        if isinstance(message, Content):
+            message = message._d
+
+        self._queued_asserts.append(message)
+
+    def retract_fact(self, message):
+        if isinstance(message, Content):
+            message = message._d
+
+        self._queued_retracts.append(message)
+
 class Closure(object):
 
     def __init__(self, host, state, message, handle, ruleset_name):
@@ -27,11 +61,13 @@ class Closure(object):
         self._timer_directory = {}
         self._cancelled_timer_directory = {}
         self._message_directory = {}
-        self._queued_message_directory = {}
+        self._queue_directory = {}
         self._branch_directory = {}
         self._fact_directory = {}
+        self._delete_directory = {}
         self._retract_directory = {}
         self._completed = False
+        self._deleted = False
         self._start_time = _unix_now()
         if isinstance(message, dict): 
             self._m = message
@@ -55,14 +91,23 @@ class Closure(object):
     def get_messages(self):
         return self._message_directory
 
-    def get_queued_messages(self):
-        return self._queued_message_directory
+    def get_queues(self):
+        return self._queue_directory
+
+    def get_deletes(self):
+        return self._delete_directory
 
     def get_facts(self):
         return self._fact_directory
 
     def get_retract_facts(self):
         return self._retract_directory
+
+    def get_queue(self, ruleset_name):
+        if not ruleset_name in self._queue_directory:
+            self._queue_directory[ruleset_name] = Closure_Queue()
+        
+        return self._queue_directory[ruleset_name]
 
     def post(self, ruleset_name, message = None):
         if not message: 
@@ -83,20 +128,23 @@ class Closure(object):
 
         message_list.append(message)
 
-    def queue(self, ruleset_name, message):
-        if not 'sid' in message:
-            message['sid'] = self.s['sid']
+    def delete(self, ruleset_name = None, sid = None):
+        if not ruleset_name: 
+            ruleset_name = self.ruleset_name
+            
+        if not sid:
+            sid = self.s['sid']
 
-        if isinstance(message, Content):
-            message = message._d
+        if (ruleset_name == self.ruleset_name) and (sid == self.s['sid']):
+            self._deleted = True
 
-        message_list = []
-        if  ruleset_name in self._queued_message_directory:
-            message_list = self._queued_message_directory[ruleset_name]
+        sid_list = []
+        if  ruleset_name in self._delete_directory:
+            sid_list = self._delete_directory[ruleset_name]
         else:
-            self._queued_message_directory[ruleset_name] = message_list
+            self._delete_directory[ruleset_name] = sid_list
 
-        message_list.append(message)
+        sid_list.append(sid)
 
     def start_timer(self, timer_name, duration, timer_id = None):
         if not timer_id:
@@ -168,6 +216,9 @@ class Closure(object):
         value = self._completed
         self._completed = True
         return value
+
+    def _is_deleted(self):
+        return self._deleted
 
     def __getattr__(self, name):   
         if name in self._m:
@@ -354,6 +405,9 @@ class Ruleset(object):
     def assert_event(self, message):
         rules.assert_event(self._handle, json.dumps(message))
 
+    def queue_assert_event(self, sid, ruleset_name, message):
+        rules.queue_assert_event(self._handle, str(sid), ruleset_name, json.dumps(message))
+
     def start_assert_event(self, message):
         return rules.start_assert_event(self._handle, json.dumps(message))
 
@@ -366,6 +420,9 @@ class Ruleset(object):
     def assert_fact(self, fact):
         rules.assert_fact(self._handle, json.dumps(fact))
 
+    def queue_assert_fact(self, sid, ruleset_name, message):
+        rules.queue_assert_fact(self._handle, str(sid), ruleset_name, json.dumps(message))
+
     def start_assert_fact(self, fact):
         return rules.start_assert_fact(self._handle, json.dumps(fact))
 
@@ -377,6 +434,9 @@ class Ruleset(object):
 
     def retract_fact(self, fact):
         rules.retract_fact(self._handle, json.dumps(fact))
+
+    def queue_retract_fact(self, sid, ruleset_name, message):
+        rules.queue_retract_fact(self._handle, str(sid), ruleset_name, json.dumps(message))
 
     def start_retract_fact(self, fact):
         return rules.start_retract_fact(self._handle, json.dumps(fact))
@@ -393,14 +453,14 @@ class Ruleset(object):
     def cancel_timer(self, sid, timer):
         rules.cancel_timer(self._handle, str(sid), json.dumps(timer))
 
-    def queue_event(self, sid, ruleset_name, message):
-        rules.queue_event(self._handle, str(sid), ruleset_name, json.dumps(message))
-        
     def assert_state(self, state):
         rules.assert_state(self._handle, json.dumps(state))
         
     def get_state(self, sid):
         return json.loads(rules.get_state(self._handle, str(sid)))
+
+    def delete_state(self, sid):
+        rules.delete_state(self._handle, str(sid))
     
     def renew_action_lease(self, sid):
         rules.renew_action_lease(self._handle, str(sid))
@@ -493,10 +553,20 @@ class Ruleset(object):
                         for timer_id, timer_duration in c.get_timers().iteritems():
                             self.start_timer(c.s['sid'], timer_duration[0], timer_duration[1])
 
-                        for ruleset_name, messages in c.get_queued_messages().iteritems():
-                            for message in messages:
-                                self.queue_event(c.s['sid'], ruleset_name, message)                            
+                        for ruleset_name, q in c.get_queues().iteritems():
+                            for message in q.get_queued_posts():
+                                self.queue_assert_event(message['sid'], ruleset_name, message)
+
+                            for message in q.get_queued_asserts():
+                                self.queue_assert_fact(message['sid'], ruleset_name, message)
+
+                            for message in q.get_queued_retracts():
+                                self.queue_retract_fact(message['sid'], ruleset_name, message)
+
   
+                        for ruleset_name, sid in c.get_deletes().iteritems():
+                            self._host.delete_state(ruleset_name, sid)
+
                         binding  = 0
                         replies = 0
                         pending = {action_binding: 0}
@@ -564,7 +634,13 @@ class Ruleset(object):
                         print('unknown exception type {0}, value {1}, traceback {2}'.format(t, str(v), traceback.format_tb(tb)))
                         rules.abandon_action(self._handle, c._handle)
                         complete('unknown error')
-            
+
+                    if c._is_deleted():
+                        try:
+                            self.delete_state(c.s.sid)
+                        except BaseException as error:
+                            complete(error)
+
             if 'async' in result_container:
                 del result_container['async']
                 
@@ -842,6 +918,9 @@ class Host(object):
     def get_state(self, ruleset_name, sid):
         return self.get_ruleset(ruleset_name).get_state(sid)
 
+    def delete_state(self, ruleset_name, sid):
+        self.get_ruleset(ruleset_name).delete_state(sid)
+
     def get_ruleset_state(self, ruleset_name):
         return self.get_ruleset(ruleset_name).get_ruleset_state(sid)
 
@@ -880,9 +959,6 @@ class Host(object):
 
     def start_retract_facts(self, ruleset_name, facts):
         return self.get_ruleset(ruleset_name).start_retract_facts(facts)
-
-    def start_timer(self, ruleset_name, sid, timer_name, timer_duration):
-        self.get_ruleset(ruleset_name).start_timer(sid, timer_name, timer_duration)
 
     def patch_state(self, ruleset_name, state):
         self.get_ruleset(ruleset_name).assert_state(state)
@@ -936,3 +1012,28 @@ class Host(object):
         self._timer = threading.Timer(0.1, dispatch_ruleset, (0,))
         self._timer.daemon = True
         self._timer.start()
+
+
+class Queue(object):
+
+    def __init__(self, ruleset_name, database = {'host': 'localhost', 'port': 6379, 'password':None}, state_cache_size = 1024):
+        self._ruleset_name = ruleset_name
+        self._handle = rules.create_client(state_cache_size, ruleset_name)
+        if isinstance(database, basestring):
+            rules.bind_ruleset(None, 0, database, self._handle)
+        else: 
+            rules.bind_ruleset(database['password'], database['port'], database['host'], self._handle)
+        
+
+    def post(self, message):
+        rules.queue_assert_event(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message))
+
+    def assert_fact(self, message):
+        rules.queue_assert_fact(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message))
+
+    def retract_fact(self, message):
+        rules.queue_retract_fact(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message))
+
+    def close(self):
+        rules.delete_client(self._handle)
+

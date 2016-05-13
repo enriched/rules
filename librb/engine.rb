@@ -4,8 +4,43 @@ require_relative "../src/rulesrb/rules"
 
 module Engine
   @@timers = nil
+
+  class Closure_Queue
+    attr_reader :_queued_posts, :_queued_asserts, :_queued_retracts
+    
+    def initialize()
+      @_queued_posts = []
+      @_queued_asserts = []
+      @_queued_retracts = []
+    end
+
+    def post(message)
+      if message.kind_of? Content
+        message = message._d
+      end
+
+      @_queued_posts << message
+    end
+
+    def assert(message)
+      if message.kind_of? Content
+        message = message._d
+      end
+
+      @_queued_asserts << message
+    end
+
+    def retract(message)
+      if message.kind_of? Content
+        message = message._d
+      end
+
+      @_queued_retracts << message
+    end
+  end
+
   class Closure
-    attr_reader :host, :handle, :ruleset_name, :_timers, :_cancelled_timers, :_branches, :_messages, :_queued_messages, :_facts, :_retract
+    attr_reader :host, :handle, :ruleset_name, :_timers, :_cancelled_timers, :_branches, :_messages, :_queues, :_facts, :_retract, :_deletes, :_deleted
     attr_accessor :s
 
     def initialize(host, state, message, handle, ruleset_name)
@@ -16,12 +51,14 @@ module Engine
       @_timers = {}
       @_cancelled_timers = {}
       @_messages = {}
-      @_queued_messages = {}
+      @_queues = {}
+      @_deletes = {}
       @_branches = {}
       @_facts = {}
       @_retract = {}
       @_start_time = Time.now
       @_completed = false
+      @_deleted = false
       if message.kind_of? Hash
         @m = message
       else
@@ -58,22 +95,34 @@ module Engine
       message_list << message
     end
 
-    def queue(ruleset_name, message)
-      if message.kind_of? Content
-        message = message._d
+    def delete(ruleset_name = nil, sid = nil)
+      if !ruleset_name
+        ruleset_name = @ruleset_name
       end
 
-      if !(message.key? :sid) && !(message.key? "sid")
-        message[:sid] = @s.sid
+      if !sid
+        sid = @s.sid
       end
 
-      message_list = []
-      if @_queued_messages.key? ruleset_name
-        message_list = @_queued_messages[ruleset_name]
+      if (ruleset_name == @ruleset_name) && (sid == @s.sid)
+        @_deleted = true
+      end
+
+      sid_list = []
+      if @_deletes.key? ruleset_name
+        sid_list = @_deletes[ruleset_name]
       else
-        @_queued_messages[ruleset_name] = message_list
+        @_deletes[ruleset_name] = sid_list
       end
-      message_list << message
+      sid_list << sid
+    end
+
+    def get_queue(ruleset_name)
+      if !@_queues.key? ruleset_name
+        @_queues[ruleset_name] = Closure_Queue.new
+      end
+
+      @_queues[ruleset_name]
     end
 
     def start_timer(timer_name, duration, timer_id = nil)
@@ -151,7 +200,7 @@ module Engine
     def renew_action_lease()
       if Time.now - @_start_time < 10000
         @_start_time = Time.now
-        @host.renew_action_lease(@ruleset_name, @s.sid)
+        @host.renew_action_lease @ruleset_name, @s.sid
       end
     end
 
@@ -289,7 +338,7 @@ module Engine
                 c.s.exception = "timeout expired"
                 complete.call nil
               else
-                c.renew_action_lease()
+                c.renew_action_lease
               end
             }
             Thread.new do
@@ -382,8 +431,8 @@ module Engine
       Rules.assert_event @handle, JSON.generate(message)
     end
 
-    def queue_event(sid, ruleset_name, message)
-      Rules.queue_event @handle, sid.to_s, ruleset_name.to_s, JSON.generate(message)
+    def queue_assert_event(sid, ruleset_name, message)
+      Rules.queue_assert_event @handle, sid.to_s, ruleset_name.to_s, JSON.generate(message)
     end
 
     def start_assert_event(message)
@@ -410,6 +459,10 @@ module Engine
       Rules.assert_fact @handle, JSON.generate(fact)
     end
 
+    def queue_assert_fact(sid, ruleset_name, message)
+      Rules.queue_assert_fact @handle, sid.to_s, ruleset_name.to_s, JSON.generate(message)
+    end
+
     def start_assert_fact(fact)
       return Rules.start_assert_fact @handle, JSON.generate(fact)
     end
@@ -424,6 +477,10 @@ module Engine
 
     def retract_fact(fact)
       Rules.retract_fact @handle, JSON.generate(fact)
+    end
+
+    def queue_retract_fact(sid, ruleset_name, message)
+      Rules.queue_retract_fact @handle, sid.to_s, ruleset_name.to_s, JSON.generate(message)
     end
 
     def start_retract_fact(fact)
@@ -444,6 +501,10 @@ module Engine
 
     def get_state(sid)
       JSON.parse Rules.get_state(@handle, sid.to_s)
+    end
+
+    def delete_state(sid)
+      Rules.delete_state(@handle, sid.to_s)
     end
 
     def renew_action_lease(sid)
@@ -538,10 +599,25 @@ module Engine
                 start_timer c.s.sid, timer_duration[0], timer_duration[1]
               end
 
-              for ruleset_name, messages in c._queued_messages do
-                for message in messages do
-                  queue_event c.s.sid, ruleset_name, message  
+              for ruleset_name, q in c._queues do
+                for message in q._queued_posts do
+                  sid = (message.key? :sid) ? message[:sid]: message['sid']
+                  queue_assert_event sid.to_s, ruleset_name, message  
                 end
+
+                for message in q._queued_asserts do
+                  sid = (message.key? :sid) ? message[:sid]: message['sid']
+                  queue_assert_fact sid.to_s, ruleset_name, message  
+                end
+
+                for message in q._queued_retracts do
+                  sid = (message.key? :sid) ? message[:sid]: message['sid']
+                  queue_retract_fact sid.to_s, ruleset_name, message  
+                end
+              end
+
+              for ruleset_name, sid in c._deletes do
+                @host.delete_state ruleset_name, sid
               end
 
               binding  = 0
@@ -612,6 +688,15 @@ module Engine
               puts e.backtrace
               complete.call e
             end
+
+            if c._deleted
+              begin
+                delete_state c.s.sid
+              rescue Exception => e
+                complete.call e
+              end
+            end
+
           end
         }
         result_container[:async] = true 
@@ -1029,6 +1114,10 @@ module Engine
       get_ruleset(ruleset_name).get_state sid
     end
 
+    def delete_state(ruleset_name, sid)
+      get_ruleset(ruleset_name).delete_state sid
+    end
+
     def post_batch(ruleset_name, *events)
       get_ruleset(ruleset_name).assert_events events
     end
@@ -1075,10 +1164,6 @@ module Engine
 
     def start_retract_facts(ruleset_name, *facts)
       return get_ruleset(ruleset_name).start_retract_facts facts
-    end
-
-    def start_timer(ruleset_name, sid, timer_name, timer_duration)
-      get_ruleset(ruleset_name).start_timer sid, timer_name, timer_duration
     end
 
     def patch_state(ruleset_name, state)
@@ -1143,6 +1228,38 @@ module Engine
       end
     end
 
+  end
+
+  class Queue
+
+    def initialize(ruleset_name, database = {:host => 'localhost', :port => 6379, :password => nil}, state_cache_size = 1024)
+      @_ruleset_name = ruleset_name.to_s
+      @handle = Rules.create_client @_ruleset_name, state_cache_size
+      if database.kind_of? String
+        Rules.bind_ruleset @handle, database, 0, nil
+      else 
+        Rules.bind_ruleset @handle, database[:host], database[:port], database[:password] 
+      end
+    end
+        
+    def post(message)
+      sid = (message.key? :sid) ? message[:sid]: message['sid']
+      Rules.queue_assert_event @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
+    end
+
+    def assert(message)
+      sid = (message.key? :sid) ? message[:sid]: message['sid']
+      Rules.queue_assert_fact @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
+    end
+
+    def retract(message)
+      sid = (message.key? :sid) ? message[:sid]: message['sid']
+      Rules.queue_retract_fact @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
+    end
+
+    def close()
+      Rules.delete_client @handle
+    end
   end
 
 end

@@ -237,6 +237,7 @@ Durable.statechart :waltzdb do
     to :end, when_all(pri(2)) do
       total_time = Time.now - s.start_time
       puts "end total time: #{total_time}"
+      delete
     end
   end
 
@@ -815,4 +816,4 @@ Durable.statechart :waltzdb do
   end
 end
 
-Durable.run_all ["/tmp/redis0.sock"]
+Durable.run_all

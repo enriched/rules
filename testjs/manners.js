@@ -101,6 +101,7 @@ with (d.statechart('missManners')) {
                           and(m.t.eq('seating'), m.rightSeat.eq(c.lastSeat.seat)), 
         function(c) {
             console.log('end ' + (new Date() - c.s.startTime));
+            c.delete();
         });
         to('assign');
     }
@@ -550,4 +551,4 @@ with (d.statechart('missManners')) {
     });
 }
 
-d.runAll(['/tmp/redis0.sock']);
+d.runAll();

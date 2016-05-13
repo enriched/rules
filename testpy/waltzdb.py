@@ -220,6 +220,7 @@ with statechart('waltzdb'):
         @when_all(pri(2))
         def done_labeling(c):
             print('end {0}'.format(unix_time_millis(datetime.datetime.now()) - c.s.start_time))
+            c.delete()
 
     with state('visiting_3j'):
         def visit_3j(c):
@@ -829,5 +830,5 @@ with statechart('waltzdb'):
         create_and_post(host, {'t':'line' ,'p1':500005 ,'p2':500006})
         create_and_post(host, {'t':'line' ,'p1':470008 ,'p2':480008})
 
-run_all(['/tmp/redis0.sock'])
+run_all()
 
